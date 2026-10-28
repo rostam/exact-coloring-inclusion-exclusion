@@ -84,59 +84,71 @@ cargo run --release --example compare [max_n]  # Markdown table of times and col
 
 ### Results
 
-These are from one machine (12 cores, all algorithms single-threaded), Criterion medians.
+These are Criterion medians from one machine (12 cores). "Parallel" means the default rayon evaluation and "sequential" means `Exec::Sequential`. All baselines are single-threaded.
 
 **Exact χ on `G(n, 1/2)`:**
 
-| n | IE (Prop. 1) | IE, unbracketed | IE polyspace (Prop. 2) | Lawler | DSATUR B&B |
-|---:|---:|---:|---:|---:|---:|
-| 10 | 5.7 µs | 8.2 µs | 49 µs | 46 µs | 1.5 µs |
-| 14 | 94 µs | 176 µs | 1.76 ms | 1.85 ms | 2.0 µs |
-| 18 | 1.47 ms | 2.87 ms | 47 ms | 51 ms | 2.6 µs |
-| 20 | 5.94 ms | 14.9 ms | 229 ms | 246 ms | 4.6 µs |
-| 22 | 23.8 ms | 45.9 ms | – | – | 3.8 µs |
+| n | IE parallel | IE sequential | IE unbracketed | polyspace parallel | polyspace sequential | Lawler | DSATUR B&B |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 10 | 5.1 µs | 5.0 µs | 7.2 µs | 49 µs | 50 µs | 47 µs | 1.1 µs |
+| 14 | 165 µs | 113 µs | 294 µs | 1.37 ms | 1.80 ms | 2.66 ms | 2.1 µs |
+| 16 | 297 µs | 364 µs | 475 µs | 3.59 ms | 9.21 ms | 10.3 ms | 2.3 µs |
+| 18 | 657 µs | 1.20 ms | 1.27 ms | 11.8 ms | 47.1 ms | 51.3 ms | 2.6 µs |
+| 20 | 2.02 ms | 6.79 ms | 6.02 ms | 56.1 ms | 232 ms | 255 ms | 6.1 µs |
+| 22 | 10.8 ms | 19.5 ms | 17.6 ms | – | – | – | 3.8 µs |
+
+"IE unbracketed" is the paper's binary search over `[1, n]`, run in parallel.
 
 **Density sweep, n = 18:**
 
-| p | IE | IE polyspace | Lawler | DSATUR B&B |
+| p | IE parallel | polyspace parallel | Lawler | DSATUR B&B |
 |---:|---:|---:|---:|---:|
-| 0.1 | 0.74 ms | 19.8 ms | 46.8 ms | 2.4 µs |
-| 0.5 | 1.47 ms | 47.3 ms | 52.8 ms | 2.6 µs |
-| 0.9 | 2.44 ms | 33.0 ms | 20.3 ms | 3.7 µs |
+| 0.1 | 0.38 ms | 5.96 ms | 60.4 ms | 3.1 µs |
+| 0.3 | 0.69 ms | 12.9 ms | 63.1 ms | 2.5 µs |
+| 0.5 | 0.60 ms | 11.8 ms | 53.0 ms | 2.6 µs |
+| 0.7 | 1.02 ms | 10.6 ms | 39.1 ms | 3.4 µs |
+| 0.9 | 0.95 ms | 8.25 ms | 20.5 ms | 3.7 µs |
 
 **Structured graphs:**
 
-| graph | IE | Lawler | DSATUR B&B |
+| graph | IE parallel | Lawler | DSATUR B&B |
 |---|---:|---:|---:|
-| Queen 4×5 (n=20, χ=5) | 5.9 ms | 234 ms | 3.4 µs |
-| Mycielski M5 (n=23, χ=5) | 56.7 ms | – | 83 µs |
-| Queen 5×5 (n=25, χ=5) | 229 ms | – | 4.9 µs |
+| Queen 4×5 (n=20, χ=5) | 2.62 ms | 235 ms | 3.4 µs |
+| Mycielski M5 (n=23, χ=5) | 17.9 ms | – | 84 µs |
+| Queen 5×5 (n=25, χ=5) | 67.2 ms | – | 4.8 µs |
 
-**Counting:**
+**Counting (parallel):**
 
-- `chromatic_polynomial` for n = 10 / 14 / 18: 0.16 / 4.8 / 152 ms.
-- `chromatic_sum` for n = 10 / 14: 0.67 / 94 ms.
+- `chromatic_polynomial` for n = 10 / 14 / 16 / 18: 0.16 / 4.8 / 13.5 / 65 ms.
+- `chromatic_sum` for n = 10 / 12 / 14: 0.64 / 2.3 / 56 ms.
 
-**Heuristics vs. the exact value.** This is from `examples/compare`, `G(n, p)` with `n ≤ 24`. DSATUR found χ on 23 of 24 random instances. Largest-first found it on 18 and plain greedy on 9. Greedy was off by as much as 2.
+**Heuristics:**
 
-**Parallel vs. sequential** (12 cores, `G(n, 1/2)`):
+- Running times on `G(n, 1/2)` for n = 20 / 40 / 64:
+  - greedy: 0.12 / 0.21 / 0.34 µs;
+  - largest-first: 0.28 / 1.0 / 1.8 µs;
+  - DSATUR: 1.7 / 6.2 / 15 µs.
+- Accuracy, from `examples/compare` on `G(n, p)` with `n ≤ 24`: DSATUR found χ on 23 of 24 random instances, largest-first on 18 and plain greedy on 9. Greedy was off by as much as 2.
+
+**Parallel vs. sequential at larger n** (`G(n, 1/2)`; the Prop. 2 row is from Criterion, the others are one-off timings):
 
 | | n | sequential | parallel | speedup |
 |---|---:|---:|---:|---:|
-| Prop. 1 sum only | 26 | 436 ms | 87 ms | 5.0× |
 | `i(Y)` table | 26 | 100 ms | 19 ms | 5.2× |
 | Prop. 1 end to end | 26 | 550 ms | 132 ms | 4.2× |
-| Prop. 2 (polyspace) | 20 | 230 ms | 39 ms | 6.0× |
+| Prop. 2 (polyspace) | 20 | 232 ms | 56 ms | 4.1× |
 | Prop. 3 (`stable_partition_counts`) | 18 | 172 ms | 40 ms | 4.3× |
 | Prop. 4 (`chromatic_sum`) | 14 | 58 ms | 30 ms | 1.9× |
 
-For n ≤ 14 the thread overhead outweighs the gain. The single-threaded tables above were measured before parallelisation and correspond to `Exec::Sequential`.
-
 ### Takeaways
 
-- **IE scales as predicted.** Prop. 1 grows by about 4× per two extra vertices, i.e. `2^n`. Lawler grows by about 5× (theory: `2.44^n`). The polynomial-space variant is close to Lawler and grows a little faster than the exponential-space IE.
-- **IE beats the classical exact DP.** At n = 20 it is roughly 40× faster than Lawler, and the gap widens with `n`.
-- **Bracketing helps.** Using DSATUR as the upper bound halves the binary-search cost compared with searching all of `[1, n]` as the paper does.
-- **IE's cost is almost independent of structure.** It only grows mildly with χ, because proving `c_k = 0` for larger `k` needs more moduli. Lawler instead gets faster on dense graphs, where there are fewer maximal independent sets.
+- **IE scales as predicted.** Sequential Prop. 1 grows by about 4× per two extra vertices from n = 18 to 22, i.e. `2^n`. Lawler grows by about 5× (theory: `2.44^n`). The polynomial-space variant, run sequentially, tracks Lawler closely.
+- **IE beats the classical exact DP.** At n = 20 sequential IE is about 38× faster than Lawler, and parallel IE is about 125× faster. The gap widens with `n`.
+- **Parallelism pays off from about n = 16.**
+  - Polyspace gains about 4× at n = 18–20, because it is compute-bound.
+  - Prop. 1 gains 2–3.4× at n = 18–22 and 4.2× at n = 26.
+  - At n ≤ 14 the thread overhead makes the parallel path slightly slower: 165 µs vs. 113 µs at n = 14.
+- **Bracketing helps.** Using DSATUR as the upper bound makes Prop. 1 1.6–3× faster than searching all of `[1, n]` as the paper does.
+- **IE's cost is almost independent of structure.** It only grows mildly with χ, because proving `c_k = 0` for larger `k` needs more moduli. Lawler instead gets 3× faster on dense graphs, where there are fewer maximal independent sets.
 - **DSATUR branch and bound is far faster on every instance here.** Its clique and heuristic bounds close the gap almost immediately at these sizes. It agreed with IE on all test graphs and on 36 extra random graphs with 24 vertices. Its worst case is still exponential with no `2^n` guarantee: G(60, 1/2) takes about 150 ms and Mycielski M6 (n = 47) about 90 ms, and it degrades sharply beyond that.
 - **IE's strengths are elsewhere.** Its running time is predictable and independent of structure, it gives a provable `O*(2^n)` bound, and the same machinery yields exact counts: chromatic polynomial, partitions into stable sets, and chromatic sum. Branch and bound cannot produce those counts.
