@@ -16,10 +16,50 @@
 //!
 //! All sums are evaluated with the exact multi-modulus scheme from
 //! [`crate::modular`], so every answer is deterministic and exact.
+//!
+//! The `2^n`-term inclusion–exclusion sums are split into chunks of subsets
+//! that are summed in parallel with rayon. Modular and wrapping arithmetic is
+//! associative and commutative, so the result does not depend on how the
+//! chunks are combined: parallel and sequential runs return identical values.
+//! The `*_with` functions take an [`Exec`] to choose explicitly.
+
+use std::ops::Range;
+
+use rayon::prelude::*;
 
 use crate::baselines;
 use crate::graph::{Graph, full_mask, iter_bits};
 use crate::modular::{self, ModEval, Modulus, Montgomery, Wrap64};
+
+/// How the inclusion–exclusion sums over all subsets are evaluated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Exec {
+    Sequential,
+    /// Chunks of subsets summed on rayon's global thread pool.
+    Parallel,
+}
+
+/// Subsets per parallel task: large enough to amortise scheduling, small
+/// enough to balance load.
+const CHUNK: usize = 1 << 12;
+
+/// Folds `chunk` over `0..len` split into ranges and merges the partial
+/// results with `combine`, which must be associative and commutative.
+fn fold_subsets<T: Send>(
+    len: usize,
+    exec: Exec,
+    chunk: impl Fn(Range<usize>) -> T + Sync,
+    combine: impl Fn(T, T) -> T + Sync,
+) -> T {
+    if exec == Exec::Sequential || len <= CHUNK {
+        return chunk(0..len);
+    }
+    (0..len.div_ceil(CHUNK))
+        .into_par_iter()
+        .map(|i| chunk(i * CHUNK..((i + 1) * CHUNK).min(len)))
+        .reduce_with(&combine)
+        .expect("at least one chunk")
+}
 
 /// Largest graph for which the `2^n`-entry table of [`independent_set_counts`]
 /// is built (about 4 GiB at `n = 30`).
@@ -43,20 +83,52 @@ pub const MAX_POLY_VERTICES: usize = 25;
 /// i(Y) = i(Y - v) + i(Y - N[v]) + 1.
 /// ```
 ///
-/// Both arguments on the right are numerically smaller bitmasks, so filling the
-/// table in increasing order takes `O(2^n)` time.
+/// We always take `v` to be the highest vertex of `Y`. Then for the block of
+/// subsets `Y` with highest vertex `j`, i.e. `Y ∈ [2^j, 2^(j+1))`, both
+/// arguments on the right lie below `2^j`. Each block therefore depends only
+/// on earlier blocks, and its entries can be filled in parallel. The whole
+/// table takes `O(2^n)` time.
 pub fn independent_set_counts(g: &Graph) -> Vec<u32> {
+    independent_set_counts_with(g, Exec::Parallel)
+}
+
+/// [`independent_set_counts`] with an explicit execution strategy.
+pub fn independent_set_counts_with(g: &Graph, exec: Exec) -> Vec<u32> {
     let n = g.n();
     assert!(n <= MAX_TABLE_VERTICES, "table algorithms support at most {MAX_TABLE_VERTICES} vertices");
-    let adj = g.adjacency();
     let mut t = vec![0u32; 1 << n];
-    for y in 1..1usize << n {
-        let v = y.trailing_zeros() as usize;
-        let without_v = y & (y - 1);
-        let without_closed_nbhd = without_v & !(adj[v] as usize);
-        t[y] = t[without_v] + t[without_closed_nbhd] + 1;
-    }
+    fill_blocks(&mut t, 1, g.adjacency(), exec, |done, low, non_nbrs, out| {
+        out[0] = done[low] + done[low & non_nbrs] + 1;
+    });
     t
+}
+
+/// Fills a table of `2^n` rows of `stride` entries, block by block: the rows
+/// `Y = low | 2^j` for `low < 2^j` are computed by
+/// `row(done, low, !N(j), out)`, where `done` holds all rows below `2^j`.
+/// Row 0 must be initialised by the caller.
+fn fill_blocks(
+    t: &mut [u32],
+    stride: usize,
+    adj: &[u64],
+    exec: Exec,
+    row: impl Fn(&[u32], usize, usize, &mut [u32]) + Sync,
+) {
+    for (j, &nbrs) in adj.iter().enumerate() {
+        let (done, rest) = t.split_at_mut(stride << j);
+        let block = &mut rest[..stride << j];
+        let non_nbrs = !(nbrs as usize);
+        let fill = |first: usize, out: &mut [u32]| {
+            for (i, out_row) in out.chunks_exact_mut(stride).enumerate() {
+                row(done, first + i, non_nbrs, out_row);
+            }
+        };
+        if exec == Exec::Parallel && 1 << j > CHUNK {
+            block.par_chunks_mut(CHUNK * stride).enumerate().for_each(|(c, out)| fill(c * CHUNK, out));
+        } else {
+            fill(0, block);
+        }
+    }
 }
 
 /// Lemma 2 evaluated modulo `M`: `c_k = Σ_Y (-1)^{n-|Y|} i(Y)^k`.
@@ -64,16 +136,25 @@ struct CoverCount<'a> {
     counts: &'a [u32],
     n: usize,
     k: u64,
+    exec: Exec,
 }
 
 impl ModEval for CoverCount<'_> {
     fn eval<M: Modulus>(&self, m: &M) -> Vec<u64> {
-        let mut acc = [0u64; 2]; // [even, odd] parity of n - |Y|
-        for (y, &c) in self.counts.iter().enumerate() {
-            let term = m.pow(m.lift(c as u64), self.k);
-            let parity = (self.n as u32 - y.count_ones()) as usize & 1;
-            acc[parity] = m.add(acc[parity], term);
-        }
+        let acc = fold_subsets(
+            self.counts.len(),
+            self.exec,
+            |range| {
+                let mut acc = [0u64; 2]; // [even, odd] parity of n - |Y|
+                for y in range {
+                    let term = m.pow(m.lift(self.counts[y] as u64), self.k);
+                    let parity = (self.n as u32 - y.count_ones()) as usize & 1;
+                    acc[parity] = m.add(acc[parity], term);
+                }
+                acc
+            },
+            |a, b| [m.add(a[0], b[0]), m.add(a[1], b[1])],
+        );
         vec![m.sub(acc[0], acc[1])]
     }
 }
@@ -88,8 +169,8 @@ fn cover_count_bound_bits(total_stable_sets: u64, k: usize) -> u32 {
     (k as u32 * bit_len(total_stable_sets)).max(1)
 }
 
-fn covers_exist(counts: &[u32], n: usize, k: usize) -> bool {
-    let e = CoverCount { counts, n, k: k as u64 };
+fn covers_exist(counts: &[u32], n: usize, k: usize, exec: Exec) -> bool {
+    let e = CoverCount { counts, n, k: k as u64, exec };
     modular::is_nonzero(&e, cover_count_bound_bits(counts[counts.len() - 1] as u64, k))
 }
 
@@ -101,21 +182,26 @@ pub fn is_k_colorable(g: &Graph, k: usize) -> bool {
     if k == 0 {
         return false;
     }
-    covers_exist(&independent_set_counts(g), g.n(), k)
+    covers_exist(&independent_set_counts(g), g.n(), k, Exec::Parallel)
 }
 
 /// The chromatic number by Proposition 1: build the `i(Y)` table, then binary
 /// search for the least `k` with `c_k(G) > 0`. The search is bracketed by
 /// `[1, DSATUR upper bound]` instead of `[1, n]`, which only saves iterations.
 pub fn chromatic_number(g: &Graph) -> usize {
+    chromatic_number_with(g, Exec::Parallel)
+}
+
+/// [`chromatic_number`] with an explicit execution strategy.
+pub fn chromatic_number_with(g: &Graph, exec: Exec) -> usize {
     if g.n() == 0 {
         return 0;
     }
-    let counts = independent_set_counts(g);
+    let counts = independent_set_counts_with(g, exec);
     let (mut lo, mut hi) = (1, baselines::color_count(&baselines::dsatur(g)));
     while lo < hi {
         let mid = (lo + hi) / 2;
-        if covers_exist(&counts, g.n(), mid) {
+        if covers_exist(&counts, g.n(), mid, exec) {
             hi = mid;
         } else {
             lo = mid + 1;
@@ -135,7 +221,7 @@ pub fn chromatic_number_unbracketed(g: &Graph) -> usize {
     let (mut lo, mut hi) = (1, g.n());
     while lo < hi {
         let mid = (lo + hi) / 2;
-        if covers_exist(&counts, g.n(), mid) {
+        if covers_exist(&counts, g.n(), mid, Exec::Parallel) {
             hi = mid;
         } else {
             lo = mid + 1;
@@ -203,6 +289,13 @@ fn count_paths_and_cycles(adj: &[u64], set: u64) -> u64 {
 /// `Y` accumulates `c_k` for every candidate `k` (up to the DSATUR bound) and
 /// for enough moduli to decide each one exactly.
 pub fn chromatic_number_polyspace(g: &Graph) -> usize {
+    chromatic_number_polyspace_with(g, Exec::Parallel)
+}
+
+/// [`chromatic_number_polyspace`] with an explicit execution strategy. Each
+/// parallel task keeps its own `O(n · moduli)` accumulators, so the space
+/// stays polynomial.
+pub fn chromatic_number_polyspace_with(g: &Graph, exec: Exec) -> usize {
     let n = g.n();
     assert!(n < 64, "polynomial-space algorithm supports at most 63 vertices");
     if n == 0 {
@@ -223,21 +316,33 @@ pub fn chromatic_number_polyspace(g: &Graph) -> usize {
     }
 
     // sums[j][sign][k] for modulus j (0 is Wrap64, j >= 1 is primes[j - 1]).
-    let mut sums = vec![[vec![0u64; hi + 1], vec![0u64; hi + 1]]; primes.len() + 1];
-    let all = g.all();
-    let mut y = 0u64;
-    loop {
-        let x = count_independent_sets(adj, y) - 1;
-        let sign = ((n as u32 - y.count_ones()) & 1) as usize;
-        add_powers(&Wrap64, x, &mut sums[0][sign]);
-        for (m, s) in primes.iter().zip(&mut sums[1..]) {
-            add_powers(m, x, &mut s[sign]);
-        }
-        if y == all {
-            break;
-        }
-        y += 1;
-    }
+    let sums = fold_subsets(
+        1 << n,
+        exec,
+        |range| {
+            let mut sums = vec![[vec![0u64; hi + 1], vec![0u64; hi + 1]]; primes.len() + 1];
+            for y in range {
+                let y = y as u64;
+                let x = count_independent_sets(adj, y) - 1;
+                let sign = ((n as u32 - y.count_ones()) & 1) as usize;
+                add_powers(&Wrap64, x, &mut sums[0][sign]);
+                for (m, s) in primes.iter().zip(&mut sums[1..]) {
+                    add_powers(m, x, &mut s[sign]);
+                }
+            }
+            sums
+        },
+        |mut a, b| {
+            for (j, (sa, sb)) in a.iter_mut().zip(&b).enumerate() {
+                for sign in 0..2 {
+                    for (x, &y) in sa[sign].iter_mut().zip(&sb[sign]) {
+                        *x = if j == 0 { Wrap64.add(*x, y) } else { primes[j - 1].add(*x, y) };
+                    }
+                }
+            }
+            a
+        },
+    );
     (1..=hi)
         .find(|&k| {
             Wrap64.sub(sums[0][0][k], sums[0][1][k]) != 0
@@ -261,23 +366,20 @@ fn add_powers<M: Modulus>(m: &M, x: u64, sums: &mut [u64]) {
 /// `s_j(Y)`, the number of stable sets of size `j` (including the empty set at
 /// `j = 0`) inside `Y`, for all `Y` and `j <= stride - 1`, laid out row-major
 /// with `stride = α(G) + 1`.
-fn sized_independent_set_counts(g: &Graph) -> (Vec<u32>, usize) {
+fn sized_independent_set_counts(g: &Graph, exec: Exec) -> (Vec<u32>, usize) {
     let n = g.n();
     assert!(n <= MAX_POLY_VERTICES, "at most {MAX_POLY_VERTICES} vertices supported");
     let stride = maximum_independent_set(g.adjacency(), g.all()).count_ones() as usize + 1;
-    let adj = g.adjacency();
     let mut t = vec![0u32; stride << n];
     t[0] = 1;
-    for y in 1..1usize << n {
-        let v = y.trailing_zeros() as usize;
-        let a = (y & (y - 1)) * stride;
-        let b = (y & (y - 1) & !(adj[v] as usize)) * stride;
-        let row = y * stride;
-        t[row] = 1;
+    // s_j(Y) = s_j(Y - v) + s_{j-1}(Y - N[v]) for the highest vertex v of Y.
+    fill_blocks(&mut t, stride, g.adjacency(), exec, |done, low, non_nbrs, out| {
+        let (a, b) = (low * stride, (low & non_nbrs) * stride);
+        out[0] = 1;
         for j in 1..stride {
-            t[row + j] = t[a + j] + t[b + j - 1];
+            out[j] = done[a + j] + done[b + j - 1];
         }
-    }
+    });
     (t, stride)
 }
 
@@ -289,15 +391,44 @@ fn sized_independent_set_counts(g: &Graph) -> (Vec<u32>, usize) {
 /// `r! π_G(r) = Σ_Y (-1)^{n-|Y|} A(r, n)`. The sum is taken in wrapping
 /// `u128` arithmetic, which is exact because the true value is below `2^128`.
 pub fn stable_partition_counts(g: &Graph) -> Vec<u128> {
+    stable_partition_counts_with(g, Exec::Parallel)
+}
+
+/// [`stable_partition_counts`] with an explicit execution strategy.
+pub fn stable_partition_counts_with(g: &Graph, exec: Exec) -> Vec<u128> {
     let n = g.n();
     if n == 0 {
         return vec![1];
     }
-    let (t, stride) = sized_independent_set_counts(g);
+    let (t, stride) = sized_independent_set_counts(g, exec);
+    let ordered = fold_subsets(
+        1 << n,
+        exec,
+        |range| ordered_partition_sum(&t, stride, n, range),
+        |mut a, b| {
+            for (x, y) in a.iter_mut().zip(b) {
+                *x = x.wrapping_add(y);
+            }
+            a
+        },
+    );
+    let mut factorial = 1u128;
+    let mut out = vec![0u128; n + 1];
+    for r in 1..=n {
+        factorial *= r as u128;
+        debug_assert_eq!(ordered[r] % factorial, 0);
+        out[r] = ordered[r] / factorial;
+    }
+    out
+}
+
+/// The part of `Σ_Y (-1)^{n-|Y|} A(r, n, Y)` (for every `r`) contributed by
+/// the subsets `Y` in `range`, in wrapping `u128` arithmetic.
+fn ordered_partition_sum(t: &[u32], stride: usize, n: usize, range: Range<usize>) -> Vec<u128> {
     let mut ordered = vec![0u128; n + 1];
     let mut cur = vec![0u128; n + 1];
     let mut next = vec![0u128; n + 1];
-    for y in 1..1usize << n {
+    for y in range.start.max(1)..range.end {
         let s = &t[y * stride..(y + 1) * stride];
         let alpha = s.iter().rposition(|&c| c != 0).unwrap();
         let negative = (n as u32 - y.count_ones()) & 1 == 1;
@@ -327,14 +458,7 @@ pub fn stable_partition_counts(g: &Graph) -> Vec<u128> {
             next.fill(0);
         }
     }
-    let mut factorial = 1u128;
-    let mut out = vec![0u128; n + 1];
-    for r in 1..=n {
-        factorial *= r as u128;
-        debug_assert_eq!(ordered[r] % factorial, 0);
-        out[r] = ordered[r] / factorial;
-    }
-    out
+    ordered
 }
 
 /// `p_G(k)`, the number of proper colourings with colours `{1..k}`, as
@@ -388,16 +512,38 @@ struct WeightedCovers<'a> {
     n: usize,
     colours: usize,
     max_weight: usize,
+    exec: Exec,
 }
 
 impl ModEval for WeightedCovers<'_> {
     fn eval<M: Modulus>(&self, m: &M) -> Vec<u64> {
         let k = self.max_weight;
+        let (pos, neg) = fold_subsets(
+            1 << self.n,
+            self.exec,
+            |range| self.partial_sums(m, range),
+            |(mut pa, mut na), (pb, nb)| {
+                for w in 0..=k {
+                    pa[w] = m.add(pa[w], pb[w]);
+                    na[w] = m.add(na[w], nb[w]);
+                }
+                (pa, na)
+            },
+        );
+        pos.iter().zip(&neg).map(|(&a, &b)| m.sub(a, b)).collect()
+    }
+}
+
+impl WeightedCovers<'_> {
+    /// Sums of `Π_i Q_Y(z^i)` over the `Y` in `range`, split by the sign
+    /// `(-1)^{n-|Y|}` into `(positive, negative)`.
+    fn partial_sums<M: Modulus>(&self, m: &M, range: Range<usize>) -> (Vec<u64>, Vec<u64>) {
+        let k = self.max_weight;
         let mut pos = vec![0u64; k + 1];
         let mut neg = vec![0u64; k + 1];
         let mut f = vec![0u64; k + 1];
         let mut g = vec![0u64; k + 1];
-        for y in 0..1usize << self.n {
+        for y in range {
             let s: Vec<u64> =
                 self.table[y * self.stride..(y + 1) * self.stride].iter().map(|&c| m.lift(c as u64)).collect();
             // f = Π_{i=1}^{colours} Q_Y(z^i), Q_Y(z) = Σ_j s_j(Y) z^j.
@@ -421,7 +567,7 @@ impl ModEval for WeightedCovers<'_> {
                 target[w] = m.add(target[w], f[w]);
             }
         }
-        pos.iter().zip(&neg).map(|(&a, &b)| m.sub(a, b)).collect()
+        (pos, neg)
     }
 }
 
@@ -436,15 +582,20 @@ impl ModEval for WeightedCovers<'_> {
 /// `Σ_Y (-1)^{n-|Y|} Π_{i=1}^{l} Q_Y(z^i)`, and the chromatic sum is the least
 /// `w` with a nonzero coefficient.
 pub fn chromatic_sum(g: &Graph) -> usize {
+    chromatic_sum_with(g, Exec::Parallel)
+}
+
+/// [`chromatic_sum`] with an explicit execution strategy.
+pub fn chromatic_sum_with(g: &Graph, exec: Exec) -> usize {
     let n = g.n();
     if n == 0 {
         return 0;
     }
-    let (table, stride) = sized_independent_set_counts(g);
+    let (table, stride) = sized_independent_set_counts(g, exec);
     let colours = g.max_degree() + 1;
     let max_weight = baselines::coloring_sum(&baselines::greedy(g, &(0..n).collect::<Vec<_>>()));
     let total_tuples_bits = colours as u32 * bit_len(table[((1 << n) - 1) * stride..].iter().map(|&c| c as u64).sum());
-    let e = WeightedCovers { table: &table, stride, n, colours, max_weight };
+    let e = WeightedCovers { table: &table, stride, n, colours, max_weight, exec };
     modular::first_nonzero(&e, total_tuples_bits).expect("a greedy colouring achieves the upper bound")
 }
 

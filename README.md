@@ -31,6 +31,8 @@ Here `s(X)` is the number of nonempty stable sets avoiding `X`. A single `2^n` t
 
 Usually only the first modulus is needed.
 
+**Parallelism.** The `2^n`-term inclusion–exclusion sums (Props. 1–4) and the stable-set tables run in parallel with [rayon](https://crates.io/crates/rayon). Each sum is split into chunks of 4096 subsets. The chunks' partial sums are combined in modular or wrapping arithmetic, which is associative and commutative, so the results do not depend on scheduling. The tables use the recursion on the *highest* vertex of `Y`, so the block of subsets with highest vertex `j` depends only on subsets below `2^j` and is filled in parallel. The tests check that the parallel results are identical to the sequential path. Every entry point has a `*_with(g, Exec::Sequential | Exec::Parallel)` variant, and the plain functions use `Exec::Parallel`.
+
 **Comparison algorithms** (`src/baselines.rs`):
 
 - first-fit greedy;
@@ -116,6 +118,19 @@ These are from one machine (12 cores, all algorithms single-threaded), Criterion
 - `chromatic_sum` for n = 10 / 14: 0.67 / 94 ms.
 
 **Heuristics vs. the exact value.** This is from `examples/compare`, `G(n, p)` with `n ≤ 24`. DSATUR found χ on 23 of 24 random instances. Largest-first found it on 18 and plain greedy on 9. Greedy was off by as much as 2.
+
+**Parallel vs. sequential** (12 cores, `G(n, 1/2)`):
+
+| | n | sequential | parallel | speedup |
+|---|---:|---:|---:|---:|
+| Prop. 1 sum only | 26 | 436 ms | 87 ms | 5.0× |
+| `i(Y)` table | 26 | 100 ms | 19 ms | 5.2× |
+| Prop. 1 end to end | 26 | 550 ms | 132 ms | 4.2× |
+| Prop. 2 (polyspace) | 20 | 230 ms | 39 ms | 6.0× |
+| Prop. 3 (`stable_partition_counts`) | 18 | 172 ms | 40 ms | 4.3× |
+| Prop. 4 (`chromatic_sum`) | 14 | 58 ms | 30 ms | 1.9× |
+
+For n ≤ 14 the thread overhead outweighs the gain. The single-threaded tables above were measured before parallelisation and correspond to `Exec::Sequential`.
 
 ### Takeaways
 

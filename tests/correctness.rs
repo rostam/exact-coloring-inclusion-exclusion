@@ -1,6 +1,6 @@
 use ie_coloring::baselines::{self, brute_force_chromatic_number, color_count};
 use ie_coloring::graph::{Graph, iter_bits};
-use ie_coloring::ie;
+use ie_coloring::ie::{self, Exec};
 
 /// Graphs with known chromatic numbers.
 fn named_graphs() -> Vec<(&'static str, Graph, usize)> {
@@ -285,5 +285,59 @@ fn approximation_is_within_guarantee() {
             );
         }
         assert_eq!(ie::approximate_chromatic_number(&g, 0.0), chi);
+    }
+}
+
+// ----- parallel evaluation ---------------------------------------------------
+
+/// Random graphs large enough that the subset sums span many parallel chunks.
+fn chunked_graphs(max_n: usize) -> impl Iterator<Item = Graph> {
+    (13..=max_n).flat_map(|n| [0.2, 0.5, 0.8].map(move |p| Graph::random(n, p, n as u64 * 7 + (p * 10.0) as u64)))
+}
+
+#[test]
+fn parallel_chromatic_number_matches_sequential() {
+    for g in chunked_graphs(22) {
+        let chi = ie::chromatic_number_with(&g, Exec::Sequential);
+        assert_eq!(ie::chromatic_number_with(&g, Exec::Parallel), chi, "{:?}", g.edges());
+        assert_eq!(color_count(&baselines::dsatur_exact(&g)), chi);
+        if g.n() <= 18 {
+            assert_eq!(ie::chromatic_number_polyspace_with(&g, Exec::Parallel), chi);
+            assert_eq!(ie::chromatic_number_polyspace_with(&g, Exec::Sequential), chi);
+        }
+    }
+    for g in [Graph::mycielski(5), Graph::queen(5, 5)] {
+        assert_eq!(ie::chromatic_number_with(&g, Exec::Parallel), ie::chromatic_number_with(&g, Exec::Sequential));
+    }
+}
+
+#[test]
+fn parallel_counting_matches_sequential() {
+    for g in chunked_graphs(17) {
+        assert_eq!(
+            ie::stable_partition_counts_with(&g, Exec::Parallel),
+            ie::stable_partition_counts_with(&g, Exec::Sequential),
+            "{:?}",
+            g.edges()
+        );
+    }
+    for g in chunked_graphs(14) {
+        assert_eq!(ie::chromatic_sum_with(&g, Exec::Parallel), ie::chromatic_sum_with(&g, Exec::Sequential));
+    }
+}
+
+/// The block-parallel table (recursion on the highest vertex) must equal the
+/// original sequential table (recursion on the lowest vertex).
+#[test]
+fn parallel_table_matches_lowest_vertex_recursion() {
+    for g in chunked_graphs(20).chain([Graph::new(16), Graph::complete(15), Graph::mycielski(5)]) {
+        let adj = g.adjacency();
+        let mut reference = vec![0u32; 1 << g.n()];
+        for y in 1..1usize << g.n() {
+            let v = y.trailing_zeros() as usize;
+            reference[y] = reference[y & (y - 1)] + reference[y & (y - 1) & !(adj[v] as usize)] + 1;
+        }
+        assert_eq!(ie::independent_set_counts_with(&g, Exec::Parallel), reference, "{:?}", g.edges());
+        assert_eq!(ie::independent_set_counts_with(&g, Exec::Sequential), reference);
     }
 }

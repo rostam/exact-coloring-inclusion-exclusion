@@ -14,7 +14,7 @@ use std::sync::OnceLock;
 
 /// Arithmetic in `Z / mZ`. Elements are opaque `u64` representatives in which
 /// zero is always represented by `0`.
-pub trait Modulus: Copy {
+pub trait Modulus: Copy + Send + Sync {
     /// `log2` of a lower bound on the modulus.
     fn bits(&self) -> u32;
     /// Maps an ordinary integer into the internal representation.

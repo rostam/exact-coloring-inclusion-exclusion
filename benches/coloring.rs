@@ -1,5 +1,6 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use ie_coloring::{Graph, baselines, ie};
+use ie_coloring::ie::{self, Exec};
+use ie_coloring::{Graph, baselines};
 use std::hint::black_box;
 use std::time::Duration;
 
@@ -16,12 +17,18 @@ fn exact_vs_n(c: &mut Criterion) {
     for n in [10, 12, 14, 16, 18, 20, 22] {
         let g = Graph::random(n, 0.5, n as u64);
         group.bench_with_input(BenchmarkId::new("ie", n), &g, |b, g| b.iter(|| ie::chromatic_number(black_box(g))));
+        group.bench_with_input(BenchmarkId::new("ie_sequential", n), &g, |b, g| {
+            b.iter(|| ie::chromatic_number_with(black_box(g), Exec::Sequential))
+        });
         group.bench_with_input(BenchmarkId::new("ie_unbracketed", n), &g, |b, g| {
             b.iter(|| ie::chromatic_number_unbracketed(black_box(g)))
         });
         if n <= 20 {
             group.bench_with_input(BenchmarkId::new("ie_polyspace", n), &g, |b, g| {
                 b.iter(|| ie::chromatic_number_polyspace(black_box(g)))
+            });
+            group.bench_with_input(BenchmarkId::new("ie_polyspace_sequential", n), &g, |b, g| {
+                b.iter(|| ie::chromatic_number_polyspace_with(black_box(g), Exec::Sequential))
             });
             group
                 .bench_with_input(BenchmarkId::new("lawler", n), &g, |b, g| b.iter(|| baselines::lawler(black_box(g))));
