@@ -341,3 +341,124 @@ fn parallel_table_matches_lowest_vertex_recursion() {
         assert_eq!(ie::independent_set_counts_with(&g, Exec::Sequential), reference);
     }
 }
+
+// ----- Petersen graph and generalized Petersen graphs --------------------------
+
+/// Every valid `GP(n, k)` with at most `2 * max_n` vertices.
+fn generalized_petersen_graphs(max_n: usize) -> impl Iterator<Item = (usize, usize, Graph)> {
+    (3..=max_n).flat_map(|n| (1..n.div_ceil(2)).map(move |k| (n, k, Graph::generalized_petersen(n, k))))
+}
+
+/// `GP(n, k)` is bipartite exactly when `n` is even and `k` is odd; otherwise
+/// it contains an odd cycle and, being cubic and not `K_4`, has `χ = 3` by
+/// Brooks' theorem (Castagna and Prins, 1972).
+fn gp_chromatic_number(n: usize, k: usize) -> usize {
+    if n.is_multiple_of(2) && !k.is_multiple_of(2) { 2 } else { 3 }
+}
+
+/// Named generalized Petersen graphs: (name, n, k, χ, α).
+const NAMED_GP: [(&str, usize, usize, usize, u32); 8] = [
+    ("cube Q3", 4, 1, 2, 4),
+    ("pentagonal prism", 5, 1, 3, 4),
+    ("Petersen", 5, 2, 3, 4),
+    ("Dürer", 6, 2, 3, 4),
+    ("Möbius–Kantor", 8, 3, 2, 8),
+    ("dodecahedron", 10, 2, 3, 8),
+    ("Desargues", 10, 3, 2, 10),
+    ("Nauru", 12, 5, 2, 12),
+];
+
+#[test]
+fn generalized_petersen_structure() {
+    assert_eq!(Graph::petersen(), Graph::generalized_petersen(5, 2));
+    for (n, k, g) in generalized_petersen_graphs(15) {
+        assert_eq!(g.n(), 2 * n);
+        assert_eq!(g.edge_count(), 3 * n, "GP({n},{k})");
+        assert!((0..2 * n).all(|v| g.degree(v) == 3), "GP({n},{k}) is cubic");
+    }
+    // The Petersen graph is triangle-free (girth 5).
+    let pet = Graph::petersen();
+    for (u, v) in pet.edges() {
+        assert_eq!(pet.neighbors(u) & pet.neighbors(v), 0);
+    }
+    for (name, n, k, _, alpha) in NAMED_GP {
+        let g = Graph::generalized_petersen(n, k);
+        let brute = (0..1u64 << g.n()).filter(|&s| g.is_independent(s)).map(u64::count_ones).max().unwrap();
+        assert_eq!(brute, alpha, "{name}");
+        assert_eq!(ie::maximum_independent_set(g.adjacency(), g.all()).count_ones(), alpha, "{name}");
+    }
+}
+
+#[test]
+fn generalized_petersen_chromatic_numbers() {
+    for (name, n, k, chi, _) in NAMED_GP {
+        assert_eq!(gp_chromatic_number(n, k), chi, "{name}");
+    }
+    // Up to GP(12, k): 24 vertices, a 64 MiB table.
+    for (n, k, g) in generalized_petersen_graphs(12) {
+        let chi = gp_chromatic_number(n, k);
+        let label = format!("GP({n},{k})");
+        assert_eq!(ie::chromatic_number_with(&g, Exec::Parallel), chi, "{label}");
+        assert_eq!(ie::chromatic_number_with(&g, Exec::Sequential), chi, "{label}");
+        assert_eq!(ie::chromatic_number_unbracketed(&g), chi, "{label}");
+        assert!(!ie::is_k_colorable(&g, chi - 1) && ie::is_k_colorable(&g, chi), "{label}");
+        assert_eq!(color_count(&baselines::dsatur_exact(&g)), chi, "{label}");
+        if 2 * n <= 20 {
+            assert_eq!(ie::chromatic_number_polyspace(&g), chi, "{label}");
+            assert_eq!(baselines::lawler(&g), chi, "{label}");
+        }
+        if 2 * n <= 18 {
+            assert_eq!(brute_force_chromatic_number(&g), chi, "{label}");
+        }
+    }
+}
+
+#[test]
+fn generalized_petersen_colouring_counts() {
+    for (n, k, g) in generalized_petersen_graphs(9) {
+        // A connected bipartite graph has exactly two 2-colourings.
+        let two = if gp_chromatic_number(n, k) == 2 { 2 } else { 0 };
+        assert_eq!(ie::count_colorings(&g, 2), Some(two), "GP({n},{k})");
+    }
+    for (n, k, g) in generalized_petersen_graphs(6) {
+        assert_eq!(ie::chromatic_polynomial(&g), deletion_contraction(g.adjacency()), "GP({n},{k})");
+        let threes = (0..3u64.pow(2 * n as u32))
+            .filter(|&code| {
+                let colour: Vec<usize> = (0..2 * n).map(|v| (code / 3u64.pow(v as u32) % 3) as usize).collect();
+                g.is_proper_coloring(&colour)
+            })
+            .count();
+        assert_eq!(ie::count_colorings(&g, 3), Some(threes as u128), "GP({n},{k})");
+    }
+    // The Petersen graph has 120 proper 3-colourings, all equivalent up to
+    // permuting the colours: 120 = 3! · 20.
+    assert_eq!(ie::count_colorings(&Graph::petersen(), 3), Some(120));
+    assert_eq!(ie::stable_partition_counts(&Graph::petersen())[3], 20);
+}
+
+#[test]
+fn generalized_petersen_sum_optimal_and_approximate() {
+    for (n, k, g) in generalized_petersen_graphs(8) {
+        let label = format!("GP({n},{k})");
+        let chi = gp_chromatic_number(n, k);
+        let sum = ie::chromatic_sum(&g);
+        if 2 * n <= 10 {
+            assert_eq!(sum, brute_force_chromatic_sum(&g), "{label}");
+        }
+        if chi == 2 {
+            // Bipartite and cubic: colour classes of size n, so Σ = n·1 + n·2.
+            assert_eq!(sum, 3 * n, "{label}");
+        }
+        assert_eq!(ie::chromatic_sum_with(&g, Exec::Sequential), sum, "{label}");
+    }
+    for (n, k, g) in generalized_petersen_graphs(10) {
+        let colouring = ie::optimal_coloring(&g);
+        assert!(g.is_proper_coloring(&colouring), "GP({n},{k})");
+        assert_eq!(color_count(&colouring), gp_chromatic_number(n, k), "GP({n},{k})");
+        for eps in [0.0, 0.5, 1.0] {
+            let approx = ie::approximate_chromatic_number(&g, eps);
+            let chi = gp_chromatic_number(n, k);
+            assert!(chi <= approx && approx as f64 <= ((1.0 + eps) * chi as f64).ceil(), "GP({n},{k}) eps {eps}");
+        }
+    }
+}

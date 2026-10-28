@@ -155,12 +155,21 @@ impl Graph {
         g
     }
 
+    /// The Petersen graph, `GP(5, 2)`.
     pub fn petersen() -> Graph {
-        let mut g = Graph::new(10);
-        for i in 0..5 {
-            g.add_edge(i, (i + 1) % 5); // outer cycle
-            g.add_edge(i, i + 5); // spokes
-            g.add_edge(5 + i, 5 + (i + 2) % 5); // inner pentagram
+        Graph::generalized_petersen(5, 2)
+    }
+
+    /// The generalized Petersen graph `GP(n, k)` for `1 <= k < n / 2`: an outer
+    /// cycle `u_0..u_{n-1}` (vertices `0..n`), spokes `u_i v_i`, and inner edges
+    /// `v_i v_{i+k}` (vertices `n..2n`). It is cubic with `3n` edges.
+    pub fn generalized_petersen(n: usize, k: usize) -> Graph {
+        assert!(n >= 3 && k >= 1 && 2 * k < n, "GP(n, k) needs n >= 3 and 1 <= k < n / 2");
+        let mut g = Graph::new(2 * n);
+        for i in 0..n {
+            g.add_edge(i, (i + 1) % n); // outer cycle
+            g.add_edge(i, n + i); // spokes
+            g.add_edge(n + i, n + (i + k) % n); // inner star polygon
         }
         g
     }
