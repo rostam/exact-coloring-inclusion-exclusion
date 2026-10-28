@@ -1,0 +1,289 @@
+use ie_coloring::baselines::{self, brute_force_chromatic_number, color_count};
+use ie_coloring::graph::{Graph, iter_bits};
+use ie_coloring::ie;
+
+/// Graphs with known chromatic numbers.
+fn named_graphs() -> Vec<(&'static str, Graph, usize)> {
+    vec![
+        ("empty0", Graph::new(0), 0),
+        ("empty1", Graph::new(1), 1),
+        ("empty7", Graph::new(7), 1),
+        ("K2", Graph::complete(2), 2),
+        ("K7", Graph::complete(7), 7),
+        ("K12", Graph::complete(12), 12),
+        ("P9", Graph::path(9), 2),
+        ("C5", Graph::cycle(5), 3),
+        ("C8", Graph::cycle(8), 2),
+        ("C13", Graph::cycle(13), 3),
+        ("W6", Graph::wheel(6), 4),
+        ("W7", Graph::wheel(7), 3),
+        ("K3,4", Graph::complete_bipartite(3, 4), 2),
+        ("Petersen", Graph::petersen(), 3),
+        ("Grotzsch", Graph::mycielski(4), 4),
+        ("Mycielski5", Graph::mycielski(5), 5),
+        ("Queen3x3", Graph::queen(3, 3), 5),
+        ("Queen4x4", Graph::queen(4, 4), 5),
+        ("Queen5x5", Graph::queen(5, 5), 5),
+    ]
+}
+
+/// A spread of random graphs: sizes 1..=13 and densities 0.1..=0.9.
+fn random_graphs() -> impl Iterator<Item = Graph> {
+    (1..=13).flat_map(|n| (1..=9).map(move |d| Graph::random(n, d as f64 / 10.0, (n * 100 + d) as u64)))
+}
+
+#[test]
+fn chromatic_number_of_named_graphs() {
+    for (name, g, chi) in named_graphs() {
+        assert_eq!(ie::chromatic_number(&g), chi, "{name}");
+        assert_eq!(ie::chromatic_number_unbracketed(&g), chi, "{name} (unbracketed)");
+        assert_eq!(color_count(&baselines::dsatur_exact(&g)), chi, "{name} (DSATUR B&B)");
+        if g.n() <= 23 {
+            assert_eq!(ie::chromatic_number_polyspace(&g), chi, "{name} (polyspace)");
+            assert_eq!(baselines::lawler(&g), chi, "{name} (Lawler)");
+        }
+    }
+}
+
+#[test]
+fn all_exact_algorithms_agree_on_random_graphs() {
+    for g in random_graphs() {
+        let chi = brute_force_chromatic_number(&g);
+        assert_eq!(ie::chromatic_number(&g), chi, "{:?}", g.edges());
+        assert_eq!(ie::chromatic_number_unbracketed(&g), chi);
+        assert_eq!(ie::chromatic_number_polyspace(&g), chi);
+        assert_eq!(baselines::lawler(&g), chi);
+        let bb = baselines::dsatur_exact(&g);
+        assert!(g.is_proper_coloring(&bb));
+        assert_eq!(color_count(&bb), chi);
+    }
+}
+
+#[test]
+fn k_colorability_is_a_threshold_at_chi() {
+    for g in random_graphs().step_by(7) {
+        let chi = brute_force_chromatic_number(&g);
+        for k in 0..=g.n() + 1 {
+            assert_eq!(ie::is_k_colorable(&g, k), k >= chi, "k = {k}, edges {:?}", g.edges());
+        }
+    }
+}
+
+#[test]
+fn heuristics_produce_proper_colorings_no_better_than_chi() {
+    for g in random_graphs() {
+        let chi = ie::chromatic_number(&g);
+        let order: Vec<usize> = (0..g.n()).collect();
+        for c in [baselines::greedy(&g, &order), baselines::largest_first(&g), baselines::dsatur(&g)] {
+            assert!(g.is_proper_coloring(&c));
+            assert!(color_count(&c) >= chi);
+        }
+        assert!(baselines::greedy_clique(&g).len() <= chi);
+    }
+}
+
+/// Lemma 2: c_k(G) = Σ_Y (-1)^{n-|Y|} i(Y)^k equals the number of k-tuples of
+/// nonempty stable sets whose union is V, computed by enumeration.
+#[test]
+fn lemma2_counts_covers_exactly() {
+    for g in random_graphs().filter(|g| g.n() <= 6) {
+        let n = g.n();
+        let counts = ie::independent_set_counts(&g);
+        let stable: Vec<u64> = (1..1u64 << n).filter(|&s| g.is_independent(s)).collect();
+        assert_eq!(counts[(1 << n) - 1] as usize, stable.len());
+        for k in 1..=3 {
+            let formula: i128 = counts
+                .iter()
+                .enumerate()
+                .map(|(y, &c)| {
+                    let sign = if (n as u32 - (y as u64).count_ones()).is_multiple_of(2) { 1 } else { -1 };
+                    sign * (c as i128).pow(k as u32)
+                })
+                .sum();
+            let mut brute = 0i128;
+            let mut idx = vec![0usize; k];
+            'tuples: loop {
+                if idx.iter().fold(0, |acc, &i| acc | stable[i]) == g.all() {
+                    brute += 1;
+                }
+                for slot in idx.iter_mut() {
+                    *slot += 1;
+                    if *slot < stable.len() {
+                        continue 'tuples;
+                    }
+                    *slot = 0;
+                }
+                break;
+            }
+            assert_eq!(formula, brute, "k = {k}, edges {:?}", g.edges());
+        }
+    }
+}
+
+#[test]
+fn independent_set_counter_matches_table() {
+    for g in random_graphs().filter(|g| g.n() >= 8) {
+        let counts = ie::independent_set_counts(&g);
+        for y in (0..1u64 << g.n()).step_by(37) {
+            assert_eq!(ie::count_independent_sets(g.adjacency(), y), counts[y as usize] as u64 + 1);
+        }
+    }
+    // Pure paths and cycles exercise the Fibonacci / Lucas closed forms.
+    assert_eq!(ie::count_independent_sets(Graph::path(10).adjacency(), Graph::path(10).all()), 144);
+    assert_eq!(ie::count_independent_sets(Graph::cycle(10).adjacency(), Graph::cycle(10).all()), 123);
+}
+
+#[test]
+fn maximum_independent_set_is_maximum() {
+    for g in random_graphs() {
+        let mis = ie::maximum_independent_set(g.adjacency(), g.all());
+        assert!(g.is_independent(mis));
+        let alpha = (0..1u64 << g.n()).filter(|&s| g.is_independent(s)).map(u64::count_ones).max().unwrap();
+        assert_eq!(mis.count_ones(), alpha);
+    }
+}
+
+// ----- number of colourings --------------------------------------------------
+
+/// Chromatic polynomial by deletion–contraction, as coefficients of k^j.
+fn deletion_contraction(adj: &[u64]) -> Vec<i128> {
+    let n = adj.len();
+    let Some(u) = (0..n).find(|&u| adj[u] != 0) else {
+        let mut p = vec![0; n + 1];
+        p[n] = 1;
+        return p;
+    };
+    let v = adj[u].trailing_zeros() as usize;
+    let mut deleted = adj.to_vec();
+    deleted[u] &= !(1 << v);
+    deleted[v] &= !(1 << u);
+    // Contract v into u, then drop v and renumber.
+    let mut merged = deleted.clone();
+    for w in iter_bits(deleted[v]) {
+        merged[u] |= 1 << w;
+        merged[w] |= 1 << u;
+    }
+    let low = (1u64 << v) - 1;
+    let contracted: Vec<u64> =
+        (0..n).filter(|&w| w != v).map(|w| (merged[w] & low) | ((merged[w] >> (v + 1)) << v)).collect();
+    let a = deletion_contraction(&deleted);
+    let b = deletion_contraction(&contracted);
+    (0..=n).map(|j| a[j] - b.get(j).copied().unwrap_or(0)).collect()
+}
+
+fn eval(poly: &[i128], k: i128) -> i128 {
+    poly.iter().rev().fold(0, |acc, &c| acc * k + c)
+}
+
+#[test]
+fn chromatic_polynomial_matches_deletion_contraction() {
+    for g in random_graphs().filter(|g| g.n() <= 9) {
+        assert_eq!(ie::chromatic_polynomial(&g), deletion_contraction(g.adjacency()), "{:?}", g.edges());
+    }
+    let pet = Graph::petersen();
+    assert_eq!(ie::chromatic_polynomial(&pet), deletion_contraction(pet.adjacency()));
+}
+
+#[test]
+fn chromatic_polynomial_closed_forms() {
+    for n in 1..=12usize {
+        // K_n: k (k-1) ... (k-n+1); P_n (a tree): k (k-1)^(n-1).
+        let kn = ie::chromatic_polynomial(&Graph::complete(n));
+        let tree = ie::chromatic_polynomial(&Graph::path(n));
+        for k in 0..=14i128 {
+            assert_eq!(eval(&kn, k), (0..n as i128).map(|i| k - i).product::<i128>());
+            assert_eq!(eval(&tree, k), k * (k - 1).pow(n as u32 - 1));
+            if n >= 3 {
+                // C_n: (k-1)^n + (-1)^n (k-1).
+                let cyc = ie::chromatic_polynomial(&Graph::cycle(n));
+                let sign = if n % 2 == 0 { 1 } else { -1 };
+                assert_eq!(eval(&cyc, k), (k - 1).pow(n as u32) + sign * (k - 1));
+            }
+        }
+    }
+}
+
+#[test]
+fn stable_partitions_of_edgeless_graph_are_stirling_numbers() {
+    // π(E_n, r) = S(n, r), Stirling numbers of the second kind.
+    let n = 15;
+    let mut stirling = vec![vec![0u128; n + 1]; n + 1];
+    stirling[0][0] = 1;
+    for i in 1..=n {
+        for r in 1..=i {
+            stirling[i][r] = r as u128 * stirling[i - 1][r] + stirling[i - 1][r - 1];
+        }
+    }
+    assert_eq!(ie::stable_partition_counts(&Graph::new(n)), stirling[n]);
+    let mut expect = vec![0u128; 11];
+    expect[10] = 1;
+    assert_eq!(ie::stable_partition_counts(&Graph::complete(10)), expect);
+}
+
+#[test]
+fn count_colorings_matches_enumeration() {
+    for g in random_graphs().filter(|g| g.n() <= 7) {
+        for k in 0..=4u64 {
+            let n = g.n();
+            let brute = (0..k.pow(n as u32))
+                .filter(|&code| {
+                    let colour: Vec<usize> = (0..n).map(|v| (code / k.pow(v as u32) % k) as usize).collect();
+                    g.is_proper_coloring(&colour)
+                })
+                .count();
+            assert_eq!(ie::count_colorings(&g, k), Some(brute as u128), "k = {k}");
+        }
+    }
+    // Large values still exact: 20 colours of the Petersen graph.
+    let pet = Graph::petersen();
+    assert_eq!(ie::count_colorings(&pet, 20), Some(eval(&deletion_contraction(pet.adjacency()), 20) as u128));
+}
+
+// ----- chromatic sum, optimal colouring, approximation -----------------------
+
+fn brute_force_chromatic_sum(g: &Graph) -> usize {
+    let n = g.n();
+    let k = g.max_degree() as u64 + 1;
+    (0..k.pow(n as u32))
+        .filter_map(|code| {
+            let colour: Vec<usize> = (0..n).map(|v| (code / k.pow(v as u32) % k) as usize).collect();
+            g.is_proper_coloring(&colour).then(|| baselines::coloring_sum(&colour))
+        })
+        .min()
+        .unwrap_or(0)
+}
+
+#[test]
+fn chromatic_sum_matches_brute_force() {
+    for g in random_graphs().filter(|g| g.n() <= 8) {
+        assert_eq!(ie::chromatic_sum(&g), brute_force_chromatic_sum(&g), "{:?}", g.edges());
+    }
+    assert_eq!(ie::chromatic_sum(&Graph::complete(6)), 21);
+    assert_eq!(ie::chromatic_sum(&Graph::complete_bipartite(3, 5)), 3 * 2 + 5);
+    assert_eq!(ie::chromatic_sum(&Graph::petersen()), brute_force_chromatic_sum(&Graph::petersen()));
+}
+
+#[test]
+fn optimal_coloring_is_proper_and_optimal() {
+    let graphs = named_graphs().into_iter().map(|(_, g, _)| g).filter(|g| g.n() <= 16).chain(random_graphs());
+    for g in graphs {
+        let colouring = ie::optimal_coloring(&g);
+        assert!(g.is_proper_coloring(&colouring), "{:?}", g.edges());
+        assert_eq!(color_count(&colouring), ie::chromatic_number(&g));
+    }
+}
+
+#[test]
+fn approximation_is_within_guarantee() {
+    for g in random_graphs().filter(|g| g.n() >= 6).chain([Graph::mycielski(5), Graph::queen(4, 5)]) {
+        let chi = ie::chromatic_number(&g);
+        for eps in [0.0, 0.1, 0.3, 0.7, 1.0, 2.0] {
+            let approx = ie::approximate_chromatic_number(&g, eps);
+            assert!(
+                chi <= approx && approx as f64 <= ((1.0 + eps) * chi as f64).ceil(),
+                "eps {eps}: {chi} vs {approx}"
+            );
+        }
+        assert_eq!(ie::approximate_chromatic_number(&g, 0.0), chi);
+    }
+}

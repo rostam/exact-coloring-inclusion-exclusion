@@ -1,0 +1,17 @@
+[package]
+name = "ie_coloring"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+[dev-dependencies]
+criterion = "0.5"
+
+# The exponential algorithms are far too slow unoptimised; tests run optimised.
+[profile.test]
+opt-level = 3
+
+[[bench]]
+name = "coloring"
+harness = false
