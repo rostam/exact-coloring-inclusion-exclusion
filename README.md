@@ -130,6 +130,46 @@ These are Criterion medians from one machine (12 cores). "Parallel" means the de
   - DSATUR: 1.7 / 6.2 / 15 µs.
 - Accuracy, from `examples/compare` on `G(n, p)` with `n ≤ 24`: DSATUR found χ on 23 of 24 random instances, largest-first on 18 and plain greedy on 9. Greedy was off by as much as 2.
 
+**Full comparison** (`cargo run --release --example compare`):
+
+- Times are wall-clock milliseconds from a single run, so small values are noisy.
+- The IE columns use the default parallel evaluation.
+- `–` means the algorithm was skipped as too large.
+- DSATUR B&B shows `0.0` wherever it finished in under 0.05 ms.
+- The last three columns are the colour counts found by the heuristics.
+
+| graph | n | m | χ | IE (Prop. 1) | IE polyspace (Prop. 2) | Lawler | DSATUR B&B | greedy | largest-first | DSATUR |
+|---|---|---|---|---|---|---|---|---|---|---|
+| G(10,0.2) | 10 | 10 | 3 | 0.0 | 0.1 | 0.2 | 0.0 | 3 | 3 | 3 |
+| G(10,0.5) | 10 | 15 | 4 | 0.0 | 0.1 | 0.1 | 0.0 | 5 | 4 | 4 |
+| G(10,0.8) | 10 | 35 | 6 | 0.0 | 0.1 | 0.1 | 0.0 | 6 | 6 | 6 |
+| G(12,0.2) | 12 | 17 | 3 | 0.0 | 0.7 | 0.8 | 0.0 | 5 | 3 | 3 |
+| G(12,0.5) | 12 | 33 | 4 | 0.0 | 0.9 | 1.0 | 0.0 | 4 | 5 | 4 |
+| G(12,0.8) | 12 | 55 | 6 | 0.1 | 0.9 | 0.7 | 0.0 | 6 | 6 | 6 |
+| G(14,0.2) | 14 | 22 | 3 | 1.1 | 2.6 | 4.2 | 0.0 | 4 | 3 | 3 |
+| G(14,0.5) | 14 | 50 | 5 | 0.5 | 2.0 | 3.7 | 0.0 | 6 | 5 | 5 |
+| G(14,0.8) | 14 | 70 | 7 | 0.2 | 1.9 | 2.2 | 0.0 | 7 | 7 | 7 |
+| G(16,0.2) | 16 | 21 | 3 | 0.7 | 3.8 | 11.5 | 0.0 | 3 | 3 | 3 |
+| G(16,0.5) | 16 | 60 | 6 | 0.5 | 4.0 | 10.5 | 0.0 | 6 | 6 | 6 |
+| G(16,0.8) | 16 | 93 | 7 | 0.4 | 2.0 | 11.0 | 0.0 | 9 | 7 | 7 |
+| G(18,0.2) | 18 | 33 | 3 | 0.7 | 14.3 | 59.0 | 0.0 | 4 | 4 | 3 |
+| G(18,0.5) | 18 | 73 | 5 | 2.0 | 9.1 | 59.2 | 0.0 | 7 | 5 | 5 |
+| G(18,0.8) | 18 | 122 | 10 | 0.8 | 9.6 | 37.4 | 0.0 | 10 | 10 | 10 |
+| G(20,0.2) | 20 | 40 | 4 | 2.9 | 38.2 | 303.5 | 0.0 | 5 | 4 | 4 |
+| G(20,0.5) | 20 | 89 | 6 | 2.4 | 43.7 | 275.5 | 0.0 | 6 | 6 | 6 |
+| G(20,0.8) | 20 | 145 | 8 | 2.5 | 36.1 | 194.8 | 0.0 | 10 | 9 | 9 |
+| G(22,0.2) | 22 | 54 | 4 | 11.9 | 202.7 | 1555.3 | 0.0 | 5 | 4 | 4 |
+| G(22,0.5) | 22 | 113 | 6 | 6.1 | 205.0 | 1293.4 | 0.0 | 7 | 7 | 6 |
+| G(22,0.8) | 22 | 186 | 10 | 8.8 | 183.2 | 639.0 | 0.0 | 12 | 10 | 10 |
+| G(24,0.2) | 24 | 48 | 4 | 25.3 | – | – | 0.0 | 5 | 4 | 4 |
+| G(24,0.5) | 24 | 142 | 6 | 25.4 | – | – | 0.0 | 8 | 7 | 6 |
+| G(24,0.8) | 24 | 226 | 11 | 87.9 | – | – | 0.0 | 12 | 12 | 11 |
+| Petersen | 10 | 15 | 3 | 0.0 | 0.1 | 0.2 | 0.0 | 3 | 3 | 3 |
+| Grötzsch (M4) | 11 | 20 | 4 | 0.0 | 0.3 | 0.4 | 0.0 | 4 | 4 | 4 |
+| Mycielski M5 | 23 | 71 | 5 | 15.7 | – | – | 0.1 | 5 | 5 | 5 |
+| Queen 4x5 | 20 | 110 | 5 | 1.9 | 44.5 | 308.9 | 0.0 | 6 | 6 | 5 |
+| Queen 5x5 | 25 | 160 | 5 | 50.2 | – | – | 0.0 | 8 | 7 | 5 |
+
 **Parallel vs. sequential at larger n** (`G(n, 1/2)`; the Prop. 2 row is from Criterion, the others are one-off timings):
 
 | | n | sequential | parallel | speedup |
